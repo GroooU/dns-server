@@ -1,14 +1,21 @@
 package config
 
 import (
+	"strings"
+
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	Listen    string      `mapstructure:"listen"`
-	Upstreams []string    `mapstructure:"upstreams"`
-	Cache     CacheConfig `mapstructure:"cache"`
-	Log       LogConfig   `mapstructure:"log"`
+	Listen    string        `mapstructure:"listen"`
+	Upstreams []string      `mapstructure:"upstreams"`
+	Cache     CacheConfig   `mapstructure:"cache"`
+	Metrics   MetricsConfig `mapstructure:"metrics"`
+	Log       LogConfig     `mapstructure:"log"`
+}
+
+type MetricsConfig struct {
+	Listen string `mapstructure:"listen"`
 }
 
 type CacheConfig struct {
@@ -29,6 +36,9 @@ func Load() (*Config, error) {
 
 	setDefaults()
 
+	// DNS_LOG_LEVEL=debug, DNS_LISTEN=0.0.0.0:53, etc.
+	viper.SetEnvPrefix("DNS")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
@@ -47,6 +57,7 @@ func Load() (*Config, error) {
 func setDefaults() {
 	viper.SetDefault("listen", "0.0.0.0:53")
 	viper.SetDefault("upstreams", []string{"8.8.8.8:53", "1.1.1.1:53"})
+	viper.SetDefault("metrics.listen", "0.0.0.0:8053")
 	viper.SetDefault("cache.max_size", 10000)
 	viper.SetDefault("cache.min_ttl", 30)
 	viper.SetDefault("cache.max_ttl", 3600)

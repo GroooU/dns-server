@@ -4,6 +4,9 @@ upstreams:
   - "8.8.8.8:53"
   - "1.1.1.1:53"
 
+metrics:
+  listen: "0.0.0.0:8053"
+
 cache:
   max_size: 10000
   min_ttl: 30
