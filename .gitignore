@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+dns-forwarder
+/bin/
+
+# Build output
+/dist/
+*.out
+
+# Test artifacts
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Config with secrets (keep config.yaml as example, ignore local overrides)
+config.local.yaml
+*.local.yaml
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

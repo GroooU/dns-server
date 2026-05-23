@@ -1,0 +1,13 @@
+listen: "0.0.0.0:53"
+
+upstreams:
+  - "8.8.8.8:53"
+  - "1.1.1.1:53"
+
+cache:
+  max_size: 10000
+  min_ttl: 30
+  max_ttl: 3600
+
+log:
+  level: "info"
