@@ -17,6 +17,20 @@ type Config struct {
 	Log       LogConfig          `mapstructure:"log"`
 	Overrides []overrides.Record `mapstructure:"overrides"`
 	TLS       TLSConfig          `mapstructure:"tls"`
+	DNSSEC    DNSSECConfig       `mapstructure:"dnssec"`
+	RateLimit RateLimitConfig    `mapstructure:"rate_limit"`
+}
+
+type DNSSECConfig struct {
+	Mode       string `mapstructure:"mode"`        // "off" | "ad" | "verify"
+	BlockBogus bool   `mapstructure:"block_bogus"` // return SERVFAIL on Bogus result
+}
+
+type RateLimitConfig struct {
+	Enabled        bool     `mapstructure:"enabled"`
+	RequestsPerSec float64  `mapstructure:"requests_per_sec"`
+	Burst          int      `mapstructure:"burst"`
+	Allowlist      []string `mapstructure:"allowlist"` // CIDR ranges exempt from limiting
 }
 
 type TLSConfig struct {
@@ -86,4 +100,10 @@ func setDefaults() {
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("tls.insecure_skip_verify", false)
 	viper.SetDefault("tls.server_name", "")
+	viper.SetDefault("dnssec.mode", "off")
+	viper.SetDefault("dnssec.block_bogus", false)
+	viper.SetDefault("rate_limit.enabled", false)
+	viper.SetDefault("rate_limit.requests_per_sec", 100.0)
+	viper.SetDefault("rate_limit.burst", 20)
+	viper.SetDefault("rate_limit.allowlist", []string{})
 }

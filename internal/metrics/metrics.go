@@ -50,3 +50,22 @@ var CacheSize = promauto.NewGauge(
 		Help: "Current number of entries in the DNS cache.",
 	},
 )
+
+// RateLimitedTotal counts requests rejected by the per-IP rate limiter.
+// No IP label — avoids high-cardinality time series.
+var RateLimitedTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "dns_rate_limited_total",
+		Help: "Total DNS requests rejected due to per-IP rate limiting.",
+	},
+)
+
+// DNSSECValidationsTotal counts DNSSEC validation outcomes by mode and result.
+// Labels: mode = "ad" | "verify"; result = "secure" | "insecure" | "bogus" | "indeterminate"
+var DNSSECValidationsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "dns_dnssec_validations_total",
+		Help: "Total DNSSEC validation outcomes by mode and result.",
+	},
+	[]string{"mode", "result"},
+)

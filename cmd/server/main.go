@@ -10,9 +10,11 @@ import (
 
 	"dns-forwarder/config"
 	"dns-forwarder/internal/cache"
+	"dns-forwarder/internal/dnssec"
 	"dns-forwarder/internal/forwarder"
 	"dns-forwarder/internal/metrics"
 	"dns-forwarder/internal/overrides"
+	"dns-forwarder/internal/ratelimit"
 	"dns-forwarder/internal/server"
 
 	"go.uber.org/zap"
@@ -51,7 +53,32 @@ func main() {
 		log.Info("local overrides loaded", zap.Int("count", len(cfg.Overrides)))
 	}
 
-	h := server.NewHandler(c, f, ovr, log)
+	validator, err := dnssec.New(cfg.DNSSEC.Mode, log)
+	if err != nil {
+		log.Fatal("dnssec config error", zap.Error(err))
+	}
+	if validator.Enabled() {
+		f.SetDNSSECOK(true)
+		log.Info("dnssec enabled",
+			zap.String("mode", cfg.DNSSEC.Mode),
+			zap.Bool("block_bogus", cfg.DNSSEC.BlockBogus),
+		)
+	}
+
+	rl, err := ratelimit.New(cfg.RateLimit)
+	if err != nil {
+		log.Fatal("rate limiter init failed", zap.Error(err))
+	}
+	if rl.Enabled() {
+		rl.Start(done)
+		log.Info("rate limiting enabled",
+			zap.Float64("requests_per_sec", cfg.RateLimit.RequestsPerSec),
+			zap.Int("burst", cfg.RateLimit.Burst),
+			zap.Int("allowlist_entries", len(cfg.RateLimit.Allowlist)),
+		)
+	}
+
+	h := server.NewHandler(c, f, ovr, validator, cfg.DNSSEC.BlockBogus, rl, log)
 	srv := server.New(cfg.Listen, h, log)
 
 	if err := srv.Start(); err != nil {

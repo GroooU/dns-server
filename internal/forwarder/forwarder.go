@@ -18,7 +18,11 @@ type Forwarder struct {
 	upstreams []Upstream
 	timeout   time.Duration
 	counter   atomic.Uint64
+	setDO     bool // stamp EDNS DO bit on every outgoing query
 }
+
+// SetDNSSECOK enables or disables stamping the DO bit on outgoing queries.
+func (f *Forwarder) SetDNSSECOK(enabled bool) { f.setDO = enabled }
 
 func New(rawURLs []string, timeout time.Duration, tlsCfg *tls.Config) (*Forwarder, error) {
 	if len(rawURLs) == 0 {
@@ -41,6 +45,15 @@ func New(rawURLs []string, timeout time.Duration, tlsCfg *tls.Config) (*Forwarde
 // Forward sends the request to upstreams in round-robin order, trying each on failure.
 // Returns the response, RTT, protocol of the successful upstream, and any error.
 func (f *Forwarder) Forward(req *dns.Msg) (*dns.Msg, time.Duration, string, error) {
+	outgoing := req.Copy()
+	if f.setDO {
+		if opt := outgoing.IsEdns0(); opt != nil {
+			opt.SetDo()
+		} else {
+			outgoing.SetEdns0(4096, true)
+		}
+	}
+
 	n := uint64(len(f.upstreams))
 	start := f.counter.Add(1) - 1
 
@@ -49,7 +62,7 @@ func (f *Forwarder) Forward(req *dns.Msg) (*dns.Msg, time.Duration, string, erro
 		upstream := f.upstreams[(start+i)%n]
 
 		ctx, cancel := context.WithTimeout(context.Background(), f.timeout)
-		resp, rtt, err := upstream.Exchange(ctx, req)
+		resp, rtt, err := upstream.Exchange(ctx, outgoing)
 		cancel()
 
 		if err != nil {

@@ -5,9 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"dns-forwarder/config"
 	"dns-forwarder/internal/cache"
+	"dns-forwarder/internal/dnssec"
 	"dns-forwarder/internal/forwarder"
 	"dns-forwarder/internal/overrides"
+	"dns-forwarder/internal/ratelimit"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -30,6 +33,15 @@ func startUpstream(t *testing.T, handler func(dns.ResponseWriter, *dns.Msg)) (ad
 	return pc.LocalAddr().String(), func() { srv.Shutdown() }
 }
 
+func disabledLimiter(t *testing.T) *ratelimit.Limiter {
+	t.Helper()
+	l, err := ratelimit.New(config.RateLimitConfig{Enabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
 func newHandler(t *testing.T, upstreamAddr string) *Handler {
 	t.Helper()
 	return newHandlerWithOverrides(t, upstreamAddr, nil)
@@ -46,7 +58,8 @@ func newHandlerWithOverrides(t *testing.T, upstreamAddr string, recs []overrides
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(c, f, ovr, zap.NewNop())
+	v, _ := dnssec.New("off", zap.NewNop())
+	return NewHandler(c, f, ovr, v, false, disabledLimiter(t), zap.NewNop())
 }
 
 func doQuery(t *testing.T, addr, name string, qtype uint16) *dns.Msg {
@@ -113,7 +126,8 @@ func TestHandlerServfailWhenUpstreamDown(t *testing.T) {
 	// point to a port nobody listens on
 	f, _ := forwarder.New([]string{"127.0.0.1:1"}, 200*time.Millisecond, nil)
 	ovr, _ := overrides.New(nil)
-	h := NewHandler(cache.New(100, 5, 3600), f, ovr, zap.NewNop())
+	v, _ := dnssec.New("off", zap.NewNop())
+	h := NewHandler(cache.New(100, 5, 3600), f, ovr, v, false, disabledLimiter(t), zap.NewNop())
 
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: h}
@@ -203,14 +217,80 @@ func TestHandlerUsesOverride(t *testing.T) {
 
 // fakeWriter captures WriteMsg output without a real connection.
 type fakeWriter struct {
-	msg *dns.Msg
+	msg        *dns.Msg
+	remoteAddr net.Addr // nil → &net.UDPAddr{} (backwards-compatible)
 }
 
-func (f *fakeWriter) LocalAddr() net.Addr         { return &net.UDPAddr{} }
-func (f *fakeWriter) RemoteAddr() net.Addr        { return &net.UDPAddr{} }
+func (f *fakeWriter) LocalAddr() net.Addr { return &net.UDPAddr{} }
+func (f *fakeWriter) RemoteAddr() net.Addr {
+	if f.remoteAddr != nil {
+		return f.remoteAddr
+	}
+	return &net.UDPAddr{}
+}
 func (f *fakeWriter) WriteMsg(m *dns.Msg) error   { f.msg = m; return nil }
 func (f *fakeWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (f *fakeWriter) Close() error                { return nil }
 func (f *fakeWriter) TsigStatus() error           { return nil }
 func (f *fakeWriter) TsigTimersOnly(bool)         {}
 func (f *fakeWriter) Hijack()                     {}
+
+func TestHandlerRateLimited(t *testing.T) {
+	upAddr, stopUp := startUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.1.1.1"),
+		}}
+		w.WriteMsg(m)
+	})
+	defer stopUp()
+
+	// Use a very low refill rate so no tokens accumulate between test calls.
+	rl, err := ratelimit.New(config.RateLimitConfig{
+		Enabled:        true,
+		RequestsPerSec: 0.001, // 1 token per ~17 minutes
+		Burst:          2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := cache.New(100, 5, 3600)
+	f, _ := forwarder.New([]string{upAddr}, 3*time.Second, nil)
+	ovr, _ := overrides.New(nil)
+	v, _ := dnssec.New("off", zap.NewNop())
+	h := NewHandler(c, f, ovr, v, false, rl, zap.NewNop())
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 9999}
+	makeQuery := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+		return m
+	}
+
+	// First two requests within burst — must succeed.
+	for i := 0; i < 2; i++ {
+		w := &fakeWriter{remoteAddr: clientAddr}
+		h.ServeDNS(w, makeQuery())
+		if w.msg.Rcode == dns.RcodeRefused {
+			t.Fatalf("request %d should not be rate-limited (burst=2)", i+1)
+		}
+	}
+
+	// Third request from the same IP — must be REFUSED.
+	w3 := &fakeWriter{remoteAddr: clientAddr}
+	h.ServeDNS(w3, makeQuery())
+	if w3.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED after burst exhausted, got %s", dns.RcodeToString[w3.msg.Rcode])
+	}
+
+	// Different IP — must still be allowed.
+	otherAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 9999}
+	w4 := &fakeWriter{remoteAddr: otherAddr}
+	h.ServeDNS(w4, makeQuery())
+	if w4.msg.Rcode == dns.RcodeRefused {
+		t.Fatal("different IP should have an independent bucket and not be rate-limited")
+	}
+}

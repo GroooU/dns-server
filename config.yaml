@@ -24,6 +24,29 @@ cache:
 log:
   level: "info"
 
+# DNSSEC validation settings.
+#   off    — no DNSSEC processing (default, fully backwards-compatible)
+#   ad     — trust the AD bit from validating upstreams (1.1.1.1, 8.8.8.8)
+#   verify — local RRSIG cryptographic check against DNSKEY in response (partial, no chain)
+#
+# Note: block_bogus is most meaningful in "verify" mode.
+# In "ad" mode, AD=0 cannot be distinguished from an unsigned zone without local crypto.
+dnssec:
+  mode: "off"
+  block_bogus: false
+
+# Per-client-IP rate limiting. Clients exceeding the limit receive REFUSED.
+# IPs matching an allowlist CIDR are always exempt.
+rate_limit:
+  enabled: false
+  requests_per_sec: 100  # tokens refilled per second per client IP
+  burst: 20              # maximum token bucket depth (handles bursts)
+  allowlist:             # CIDR ranges exempt from rate limiting
+    - "127.0.0.0/8"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
 # Local DNS overrides — answered before cache and upstream forwarding.
 # Supported types: A, AAAA, CNAME, MX, TXT, PTR, and any other RFC type.
 overrides: []

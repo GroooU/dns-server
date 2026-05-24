@@ -5,23 +5,44 @@ import (
 	"time"
 
 	"dns-forwarder/internal/cache"
+	"dns-forwarder/internal/dnssec"
 	"dns-forwarder/internal/forwarder"
 	"dns-forwarder/internal/metrics"
 	"dns-forwarder/internal/overrides"
+	"dns-forwarder/internal/ratelimit"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 )
 
 type Handler struct {
-	cache     *cache.Cache
-	forwarder *forwarder.Forwarder
-	overrides *overrides.Resolver
-	log       *zap.Logger
+	cache      *cache.Cache
+	forwarder  *forwarder.Forwarder
+	overrides  *overrides.Resolver
+	validator  *dnssec.Validator
+	blockBogus bool
+	limiter    *ratelimit.Limiter
+	log        *zap.Logger
 }
 
-func NewHandler(c *cache.Cache, f *forwarder.Forwarder, ovr *overrides.Resolver, log *zap.Logger) *Handler {
-	return &Handler{cache: c, forwarder: f, overrides: ovr, log: log}
+func NewHandler(
+	c *cache.Cache,
+	f *forwarder.Forwarder,
+	ovr *overrides.Resolver,
+	v *dnssec.Validator,
+	blockBogus bool,
+	limiter *ratelimit.Limiter,
+	log *zap.Logger,
+) *Handler {
+	return &Handler{
+		cache:      c,
+		forwarder:  f,
+		overrides:  ovr,
+		validator:  v,
+		blockBogus: blockBogus,
+		limiter:    limiter,
+		log:        log,
+	}
 }
 
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -29,6 +50,13 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	if len(r.Question) == 0 {
 		h.writeError(w, r, dns.RcodeFormatError)
+		return
+	}
+
+	if h.limiter.Enabled() && !h.limiter.Allow(w.RemoteAddr()) {
+		metrics.RateLimitedTotal.Inc()
+		h.log.Debug("rate limited", zap.String("addr", w.RemoteAddr().String()))
+		h.writeError(w, r, dns.RcodeRefused)
 		return
 	}
 
@@ -54,7 +82,12 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if cached, ok := h.cache.Get(r); ok {
-		_ = w.WriteMsg(cached)
+		toSend := cached
+		if h.validator.Enabled() && !clientWantsDO(r) {
+			toSend = cached.Copy()
+			dnssec.StripDNSSECRRs(toSend)
+		}
+		_ = w.WriteMsg(toSend)
 		elapsed := time.Since(start)
 		metrics.RequestsTotal.WithLabelValues(qtype, dns.RcodeToString[cached.Rcode], "cache").Inc()
 		metrics.RequestDuration.WithLabelValues("cache").Observe(elapsed.Seconds())
@@ -80,8 +113,32 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	if h.validator.Enabled() {
+		result := h.validator.Validate(r, resp)
+		metrics.DNSSECValidationsTotal.
+			WithLabelValues(modeLabel(h.validator.Mode()), result.String()).Inc()
+		if result == dnssec.ResultBogus {
+			h.log.Warn("dnssec bogus response",
+				zap.String("name", q.Name),
+				zap.String("type", qtype),
+				zap.String("mode", modeLabel(h.validator.Mode())),
+			)
+			if h.blockBogus {
+				h.writeError(w, r, dns.RcodeServerFailure)
+				return
+			}
+		}
+	}
+
+	// Cache the full response (with RRSIG records if present).
 	h.cache.Set(resp)
-	_ = w.WriteMsg(resp)
+
+	toSend := resp
+	if h.validator.Enabled() && !clientWantsDO(r) {
+		toSend = resp.Copy()
+		dnssec.StripDNSSECRRs(toSend)
+	}
+	_ = w.WriteMsg(toSend)
 
 	elapsed := time.Since(start)
 	rcode := dns.RcodeToString[resp.Rcode]
@@ -102,4 +159,20 @@ func (h *Handler) writeError(w dns.ResponseWriter, r *dns.Msg, rcode int) {
 	m := new(dns.Msg)
 	m.SetRcode(r, rcode)
 	_ = w.WriteMsg(m)
+}
+
+func clientWantsDO(r *dns.Msg) bool {
+	opt := r.IsEdns0()
+	return opt != nil && opt.Do()
+}
+
+func modeLabel(m dnssec.Mode) string {
+	switch m {
+	case dnssec.ModeAD:
+		return "ad"
+	case dnssec.ModeVerify:
+		return "verify"
+	default:
+		return "off"
+	}
 }
