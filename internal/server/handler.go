@@ -7,6 +7,7 @@ import (
 	"dns-forwarder/internal/cache"
 	"dns-forwarder/internal/forwarder"
 	"dns-forwarder/internal/metrics"
+	"dns-forwarder/internal/overrides"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -15,11 +16,12 @@ import (
 type Handler struct {
 	cache     *cache.Cache
 	forwarder *forwarder.Forwarder
+	overrides *overrides.Resolver
 	log       *zap.Logger
 }
 
-func NewHandler(c *cache.Cache, f *forwarder.Forwarder, log *zap.Logger) *Handler {
-	return &Handler{cache: c, forwarder: f, log: log}
+func NewHandler(c *cache.Cache, f *forwarder.Forwarder, ovr *overrides.Resolver, log *zap.Logger) *Handler {
+	return &Handler{cache: c, forwarder: f, overrides: ovr, log: log}
 }
 
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -34,6 +36,23 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	qtype := dns.TypeToString[q.Qtype]
 
+	if rrs, ok := h.overrides.Lookup(q); ok {
+		resp := new(dns.Msg)
+		resp.SetReply(r)
+		resp.Authoritative = true
+		resp.Answer = append([]dns.RR(nil), rrs...)
+		_ = w.WriteMsg(resp)
+		elapsed := time.Since(start)
+		metrics.RequestsTotal.WithLabelValues(qtype, dns.RcodeToString[dns.RcodeSuccess], "override").Inc()
+		metrics.RequestDuration.WithLabelValues("override").Observe(elapsed.Seconds())
+		h.log.Debug("override hit",
+			zap.String("name", q.Name),
+			zap.String("type", qtype),
+			zap.Duration("elapsed", elapsed),
+		)
+		return
+	}
+
 	if cached, ok := h.cache.Get(r); ok {
 		_ = w.WriteMsg(cached)
 		elapsed := time.Since(start)
@@ -47,9 +66,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	resp, rtt, err := h.forwarder.Forward(r)
+	resp, rtt, protocol, err := h.forwarder.Forward(r)
 	if err != nil {
-		metrics.UpstreamErrorsTotal.Inc()
+		metrics.UpstreamErrorsTotal.WithLabelValues("unknown").Inc()
 		metrics.RequestsTotal.WithLabelValues(qtype, "SERVFAIL", "upstream").Inc()
 		if errors.Is(err, forwarder.ErrAllUpstreamsFailed) {
 			h.log.Warn("all upstreams failed",
@@ -68,11 +87,12 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	rcode := dns.RcodeToString[resp.Rcode]
 	metrics.RequestsTotal.WithLabelValues(qtype, rcode, "upstream").Inc()
 	metrics.RequestDuration.WithLabelValues("upstream").Observe(elapsed.Seconds())
-	metrics.UpstreamDuration.Observe(rtt.Seconds())
+	metrics.UpstreamDuration.WithLabelValues(protocol).Observe(rtt.Seconds())
 	h.log.Debug("forwarded",
 		zap.String("name", q.Name),
 		zap.String("type", qtype),
 		zap.String("rcode", rcode),
+		zap.String("protocol", protocol),
 		zap.Duration("upstream_rtt", rtt),
 		zap.Duration("elapsed", elapsed),
 	)

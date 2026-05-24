@@ -1,17 +1,39 @@
 package config
 
 import (
+	"crypto/tls"
 	"strings"
+
+	"dns-forwarder/internal/overrides"
 
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	Listen    string        `mapstructure:"listen"`
-	Upstreams []string      `mapstructure:"upstreams"`
-	Cache     CacheConfig   `mapstructure:"cache"`
-	Metrics   MetricsConfig `mapstructure:"metrics"`
-	Log       LogConfig     `mapstructure:"log"`
+	Listen    string             `mapstructure:"listen"`
+	Upstreams []string           `mapstructure:"upstreams"`
+	Cache     CacheConfig        `mapstructure:"cache"`
+	Metrics   MetricsConfig      `mapstructure:"metrics"`
+	Log       LogConfig          `mapstructure:"log"`
+	Overrides []overrides.Record `mapstructure:"overrides"`
+	TLS       TLSConfig          `mapstructure:"tls"`
+}
+
+type TLSConfig struct {
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	ServerName         string `mapstructure:"server_name"`
+}
+
+// ToStdlib returns a *tls.Config for use by upstream clients.
+// Returns nil when both fields are zero-value (system defaults apply).
+func (t TLSConfig) ToStdlib() *tls.Config {
+	if !t.InsecureSkipVerify && t.ServerName == "" {
+		return nil
+	}
+	return &tls.Config{
+		InsecureSkipVerify: t.InsecureSkipVerify,
+		ServerName:         t.ServerName,
+	}
 }
 
 type MetricsConfig struct {
@@ -62,4 +84,6 @@ func setDefaults() {
 	viper.SetDefault("cache.min_ttl", 30)
 	viper.SetDefault("cache.max_ttl", 3600)
 	viper.SetDefault("log.level", "info")
+	viper.SetDefault("tls.insecure_skip_verify", false)
+	viper.SetDefault("tls.server_name", "")
 }

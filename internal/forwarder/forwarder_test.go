@@ -10,7 +10,6 @@ import (
 )
 
 // startMockServer starts a UDP DNS server on a random port.
-// handler receives the request and returns a response.
 func startMockServer(t *testing.T, handler func(w dns.ResponseWriter, r *dns.Msg)) (addr string, stop func()) {
 	t.Helper()
 
@@ -69,8 +68,8 @@ func TestForwardSuccess(t *testing.T) {
 	addr, stop := startMockServer(t, answerA)
 	defer stop()
 
-	f, _ := New([]string{addr}, 3*time.Second)
-	resp, rtt, err := f.Forward(makeQuery("example.com"))
+	f, _ := New([]string{addr}, 3*time.Second, nil)
+	resp, rtt, proto, err := f.Forward(makeQuery("example.com"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,6 +78,9 @@ func TestForwardSuccess(t *testing.T) {
 	}
 	if rtt < 0 {
 		t.Fatal("expected non-negative RTT")
+	}
+	if proto != "udp" {
+		t.Fatalf("expected protocol udp, got %q", proto)
 	}
 }
 
@@ -96,10 +98,10 @@ func TestForwardRoundRobin(t *testing.T) {
 	defer stop0()
 	defer stop1()
 
-	f, _ := New([]string{addr0, addr1}, 3*time.Second)
+	f, _ := New([]string{addr0, addr1}, 3*time.Second, nil)
 
 	for i := 0; i < 4; i++ {
-		_, _, err := f.Forward(makeQuery("example.com"))
+		_, _, _, err := f.Forward(makeQuery("example.com"))
 		if err != nil {
 			t.Fatalf("query %d failed: %v", i, err)
 		}
@@ -116,8 +118,8 @@ func TestForwardFallbackOnSERVFAIL(t *testing.T) {
 	defer stop0()
 	defer stop1()
 
-	f, _ := New([]string{addr0, addr1}, 3*time.Second)
-	resp, _, err := f.Forward(makeQuery("example.com"))
+	f, _ := New([]string{addr0, addr1}, 3*time.Second, nil)
+	resp, _, _, err := f.Forward(makeQuery("example.com"))
 	if err != nil {
 		t.Fatalf("expected fallback success, got: %v", err)
 	}
@@ -135,8 +137,8 @@ func TestForwardFallbackOnTimeout(t *testing.T) {
 	addr1, stop1 := startMockServer(t, answerA)
 	defer stop1()
 
-	f, _ := New([]string{deadAddr, addr1}, 300*time.Millisecond)
-	resp, _, err := f.Forward(makeQuery("example.com"))
+	f, _ := New([]string{deadAddr, addr1}, 300*time.Millisecond, nil)
+	resp, _, _, err := f.Forward(makeQuery("example.com"))
 	if err != nil {
 		t.Fatalf("expected fallback success, got: %v", err)
 	}
@@ -146,14 +148,13 @@ func TestForwardFallbackOnTimeout(t *testing.T) {
 }
 
 func TestForwardAllFailed(t *testing.T) {
-	// two upstreams that both SERVFAIL
 	addr0, stop0 := startMockServer(t, answerSERVFAIL)
 	addr1, stop1 := startMockServer(t, answerSERVFAIL)
 	defer stop0()
 	defer stop1()
 
-	f, _ := New([]string{addr0, addr1}, 3*time.Second)
-	_, _, err := f.Forward(makeQuery("example.com"))
+	f, _ := New([]string{addr0, addr1}, 3*time.Second, nil)
+	_, _, _, err := f.Forward(makeQuery("example.com"))
 	if err == nil {
 		t.Fatal("expected error when all upstreams fail")
 	}
@@ -163,7 +164,7 @@ func TestForwardAllFailed(t *testing.T) {
 }
 
 func TestNewNoUpstreams(t *testing.T) {
-	_, err := New([]string{}, time.Second)
+	_, err := New([]string{}, time.Second, nil)
 	if err == nil {
 		t.Fatal("expected error for empty upstreams")
 	}

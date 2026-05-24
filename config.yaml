@@ -1,8 +1,17 @@
 listen: "0.0.0.0:53"
 
+# Upstream resolvers. Supported URL schemes:
+#   host:port                 — plain UDP (default)
+#   tls://host:port           — DNS-over-TLS (DoT)
+#   https://host/dns-query    — DNS-over-HTTPS (DoH, RFC 8484)
 upstreams:
-  - "8.8.8.8:53"
-  - "1.1.1.1:53"
+  - "tls://8.8.8.8:853"
+  - "tls://1.1.1.1:853"
+
+# TLS settings for encrypted upstream connections.
+tls:
+  insecure_skip_verify: false  # set true only for self-signed test upstreams
+  server_name: ""              # override SNI, e.g. "dns.google"
 
 metrics:
   listen: "0.0.0.0:8053"
@@ -14,3 +23,20 @@ cache:
 
 log:
   level: "info"
+
+# Local DNS overrides — answered before cache and upstream forwarding.
+# Supported types: A, AAAA, CNAME, MX, TXT, PTR, and any other RFC type.
+overrides: []
+# Examples:
+#   - name: "myservice.local."
+#     type: "A"
+#     ttl: 300
+#     value: "192.168.1.100"
+#   - name: "db.local."
+#     type: "AAAA"
+#     ttl: 60
+#     value: "fd00::1"
+#   - name: "mail.local."
+#     type: "MX"
+#     ttl: 300
+#     value: "10 smtp.local."

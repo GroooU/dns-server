@@ -7,6 +7,7 @@ import (
 
 	"dns-forwarder/internal/cache"
 	"dns-forwarder/internal/forwarder"
+	"dns-forwarder/internal/overrides"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -31,12 +32,21 @@ func startUpstream(t *testing.T, handler func(dns.ResponseWriter, *dns.Msg)) (ad
 
 func newHandler(t *testing.T, upstreamAddr string) *Handler {
 	t.Helper()
+	return newHandlerWithOverrides(t, upstreamAddr, nil)
+}
+
+func newHandlerWithOverrides(t *testing.T, upstreamAddr string, recs []overrides.Record) *Handler {
+	t.Helper()
 	c := cache.New(100, 5, 3600)
-	f, err := forwarder.New([]string{upstreamAddr}, 3*time.Second)
+	f, err := forwarder.New([]string{upstreamAddr}, 3*time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(c, f, zap.NewNop())
+	ovr, err := overrides.New(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewHandler(c, f, ovr, zap.NewNop())
 }
 
 func doQuery(t *testing.T, addr, name string, qtype uint16) *dns.Msg {
@@ -101,8 +111,9 @@ func TestHandlerForwardsAndCaches(t *testing.T) {
 
 func TestHandlerServfailWhenUpstreamDown(t *testing.T) {
 	// point to a port nobody listens on
-	f, _ := forwarder.New([]string{"127.0.0.1:1"}, 200*time.Millisecond)
-	h := NewHandler(cache.New(100, 5, 3600), f, zap.NewNop())
+	f, _ := forwarder.New([]string{"127.0.0.1:1"}, 200*time.Millisecond, nil)
+	ovr, _ := overrides.New(nil)
+	h := NewHandler(cache.New(100, 5, 3600), f, ovr, zap.NewNop())
 
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: h}
@@ -134,6 +145,59 @@ func TestHandlerEmptyQuestion(t *testing.T) {
 
 	if w.msg == nil || w.msg.Rcode != dns.RcodeFormatError {
 		t.Fatalf("expected FORMERR, got %v", w.msg)
+	}
+}
+
+func TestHandlerUsesOverride(t *testing.T) {
+	upstreamHits := 0
+	upAddr, stopUp := startUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		upstreamHits++
+		m := new(dns.Msg)
+		m.SetReply(r)
+		w.WriteMsg(m)
+	})
+	defer stopUp()
+
+	h := newHandlerWithOverrides(t, upAddr, []overrides.Record{
+		{Name: "myservice.local.", Type: "A", TTL: 300, Value: "10.10.10.1"},
+	})
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: h}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go srv.ActivateAndServe()
+	<-ready
+	defer srv.Shutdown()
+
+	srvAddr := pc.LocalAddr().String()
+
+	// Override name: must not reach upstream, must return configured IP.
+	resp := doQuery(t, srvAddr, "myservice.local.", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("override should not reach upstream, got %d hits", upstreamHits)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer RR, got %d", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("expected *dns.A, got %T", resp.Answer[0])
+	}
+	if a.A.String() != "10.10.10.1" {
+		t.Errorf("expected 10.10.10.1, got %s", a.A)
+	}
+	if !resp.Authoritative {
+		t.Error("override response must be authoritative")
+	}
+
+	// Non-override name: must reach upstream.
+	doQuery(t, srvAddr, "example.com.", dns.TypeA)
+	if upstreamHits != 1 {
+		t.Fatalf("non-override should hit upstream once, got %d", upstreamHits)
 	}
 }
 

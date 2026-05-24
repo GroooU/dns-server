@@ -12,6 +12,7 @@ import (
 	"dns-forwarder/internal/cache"
 	"dns-forwarder/internal/forwarder"
 	"dns-forwarder/internal/metrics"
+	"dns-forwarder/internal/overrides"
 	"dns-forwarder/internal/server"
 
 	"go.uber.org/zap"
@@ -37,12 +38,20 @@ func main() {
 	done := make(chan struct{})
 	c.Start(done)
 
-	f, err := forwarder.New(cfg.Upstreams, 5*time.Second)
+	f, err := forwarder.New(cfg.Upstreams, 5*time.Second, cfg.TLS.ToStdlib())
 	if err != nil {
 		log.Fatal("forwarder init failed", zap.Error(err))
 	}
 
-	h := server.NewHandler(c, f, log)
+	ovr, err := overrides.New(cfg.Overrides)
+	if err != nil {
+		log.Fatal("overrides init failed", zap.Error(err))
+	}
+	if len(cfg.Overrides) > 0 {
+		log.Info("local overrides loaded", zap.Int("count", len(cfg.Overrides)))
+	}
+
+	h := server.NewHandler(c, f, ovr, log)
 	srv := server.New(cfg.Listen, h, log)
 
 	if err := srv.Start(); err != nil {

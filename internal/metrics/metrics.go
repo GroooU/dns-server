@@ -24,21 +24,23 @@ var RequestDuration = promauto.NewHistogramVec(
 	[]string{"source"},
 )
 
-// Upstream round-trip time histogram.
-var UpstreamDuration = promauto.NewHistogram(
+// Upstream round-trip time histogram, broken down by protocol (udp/dot/doh).
+var UpstreamDuration = promauto.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Name:    "dns_upstream_rtt_seconds",
 		Help:    "Round-trip time to upstream resolvers.",
 		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
 	},
+	[]string{"protocol"},
 )
 
-// Upstream failures counter.
-var UpstreamErrorsTotal = promauto.NewCounter(
+// Upstream failures counter, broken down by protocol.
+var UpstreamErrorsTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "dns_upstream_errors_total",
 		Help: "Total number of upstream resolver failures.",
 	},
+	[]string{"protocol"},
 )
 
 // Cache size gauge — updated on each stats scrape.
